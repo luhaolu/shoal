@@ -37,7 +37,7 @@ class ThreadMonitor(Thread):
 
     def run(self):
         for thread in self.threads:
-            print "starting", thread
+            logging.info("starting", thread)
             thread.start()
         while True:
             for thread in self.threads:
@@ -47,7 +47,7 @@ class ThreadMonitor(Thread):
             sleep(1)
 
     def stop(self):
-        print "\nShutting down Shoal-Server... Please wait."
+        logging.info("Shutting down Shoal-Server... Please wait.")
         try:
             self.rabbitmq.stop()
             self.update.stop()
@@ -137,14 +137,38 @@ class RabbitMQConsumer(Thread):
         self._consumer_tag = None
 
     def connect(self):
-        try:
-            return pika.SelectConnection(pika.URLParameters(self.host),
-                                             self.on_connection_open,
-                                             stop_ioloop_on_close=False)
-        except pika.exceptions.AMQPConnectionError as e:
-            logging.error("Could not connect to AMQP Server. Retrying in 30 seconds...")
-            sleep(30)
-            self.run()
+        failedConnectionAttempts = 0
+ 	sslOptions = {}
+        try: 
+          if config.use_ssl:
+            sslOptions["ca_certs"] = config.amqp_ca_cert
+            sslOptions["certfile"] = config.amqp_client_cert
+            sslOptions["keyfile"]  = config.amqp_client_key
+	except Exception as e:
+	  logging.error("Could not read SSL files")
+	  logging.error(e)
+        # tries to establish a connection with AMQP server
+        # will retry a number of times before passing the exception up
+        while True:
+          try:
+            connection = pika.SelectConnection(pika.ConnectionParameters(
+                                                 host=config.amqp_server_url,
+                                                 port=config.amqp_port,
+                                                 ssl=config.use_ssl,
+                                                 ssl_options = sslOptions
+                                               ),
+                                               self.on_connection_open,
+                                               stop_ioloop_on_close=False)
+            return connection
+          except pika.exceptions.AMQPConnectionError as e:
+            failedConnectionAttempts += 1
+            if failedConnectionAttempts >= config.error_reconnect_attempts:
+              logging.error("Was not able to establish connection to AMQP server after {0} attempts.".format(failedConnectionAttempts))
+              logging.error(e)
+              raise e
+            logging.error("Could not connect to AMQP Server. Retrying in {0} seconds...".format(config.error_reconnect_time))
+            sleep(config.error_reconnect_time)
+            continue
 
     def close_connection(self):
         self._connection.close()
@@ -253,27 +277,22 @@ class RabbitMQConsumer(Thread):
             logging.error("Message body could not be decoded. Message: {1}".format(body))
             return
         except KeyError:
-            logging.error("message body is missing a unique identifier, discarding...")
-            return
-        finally:
-            self.acknowledge_message(basic_deliver.delivery_tag)
+            pass
+        for squid in self.shoal.values():
+           if squid.public_ip == public_ip or squid.private_ip == private_ip:
+              squid.update(load)
+              self.acknowledge_message(basic_deliver.delivery_tag)
+              return
+        if key in self.shoal:
+            self.shoal[key].update(load)
+        elif (curr - time_sent < self.INACTIVE) and (public_ip or private_ip):
+            geo_data = utilities.get_geolocation(public_ip)
+            if not geo_data:
+                geo_data = utilities.get_geolocation(external_ip)
+            if not geo_data:
+                logging.error("Unable to generate geo location data, discarding message")
+            else:
+                new_squid = SquidNode(key, hostname, squid_port, public_ip, private_ip, external_ip, load, geo_data, time_sent)
+                self.shoal[key] = new_squid
 
-        shoal_list = utilities.get_shoal()
-
-        if key in shoal_list:
-            shoal_list[key]['load'] = data['load']
-            shoal_list[key]['last_active'] = time()
-        else:
-            try:
-                geo_data = utilities.get_geolocation(data['public_ip'])
-            except KeyError as e:
-                try:
-                    geo_data = utilities.get_geolocation(data['external_ip'])
-                except KeyError as f:
-                    logging.error("Could not generate geo location data, discarding...")
-                    return
-            shoal_list[key] = data
-            shoal_list[key]['geo_data'] = geo_data
-            shoal_list[key]['last_active'] = shoal_list[key]['created'] = time()
-
-        utilities.set_shoal(shoal_list)
+        self.acknowledge_message(basic_deliver.delivery_tag)

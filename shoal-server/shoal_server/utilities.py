@@ -43,11 +43,11 @@ def set_shoal(val):
 def delete_shoal():
     set_shoal({})
 
-"""
-    Given an IP return all its geographical information (using GeoLiteCity.dat)
-"""
+logger = logging.getLogger('shoal_server')
 def get_geolocation(ip):
-    geolite_db = os.path.join(config.geolitecity_path, "GeoLiteCity.dat")
+    """
+    Given an IP return all its geographical information (using GeoLiteCity.dat)
+    """
     try:
         gi = pygeoip.GeoIP(geolite_db)
         return gi.record_by_addr(ip)
@@ -57,17 +57,21 @@ def get_geolocation(ip):
         logging.error(e)
         sys.exit(1)
 
-"""
-    Given an IP return `count` IP's of nearest Squid servers.
-"""
-def get_nearest_squids(ip, count=10):
+def get_nearest_squids(ip, count=10):  
+    """
+    Given an IP return IP of nearest squid.
+    """
     request_data = get_geolocation(ip)
+    if not request_data:
+        return None
+	
     try:
         r_lat = request_data['latitude']
         r_long = request_data['longitude']
     except KeyError as e:
-        logging.error("Invalid request, unable to generate geolocation data for IP: {0}".format(ip))
-        return
+        logger.error("Could not read request data:")
+        logger.error(e)
+    return None
 
     nearest_squids = []
     shoal_list = get_shoal()
@@ -81,11 +85,13 @@ def get_nearest_squids(ip, count=10):
     squids = sorted(nearest_squids, key=lambda k: (k[1], k[0]['load']))
     return squids[:count]
 
-"""
-    Calculate distance between two points using Haversine Formula.
-"""
 def haversine(lat1,lon1,lat2,lon2):
-    r = 6371 #radius of earth
+    """
+    Calculate distance between two points using Haversine Formula.
+    """
+    # radius of earth
+    r = 6371
+
     lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
     dlon = lon2 - lon1
     dlat = lat2 - lat1
@@ -133,6 +139,9 @@ def generate_wpad(ip):
     Function to check if geolitecity database needs updating.
 """
 def check_geolitecity_need_update():
+    """
+    Checks if the geolite database is outdated
+    """
     curr = time()
     geolite_db = os.path.join(config.geolitecity_path,"GeoLiteCity.dat")
     # check if GeoLiteCity database is older than 30 days.
@@ -151,11 +160,9 @@ def check_geolitecity_need_update():
     Function to download geolitecity database from URL.
 """
 def download_geolitecity():
-    geolite_db = os.path.join(config.geolitecity_path,"GeoLiteCity.dat")
-    geolite_url = config.geolitecity_url
-
-    print "Attempting to download GeoLiteCity database."
-
+    """
+    Downloads a new geolite database
+    """
     try:
         urlretrieve(geolite_url,geolite_db + '.gz')
     except Exception as e:
@@ -171,7 +178,20 @@ def download_geolitecity():
         f.write(content)
 
     if check_geolitecity_need_update():
-        print 'GeoLiteCity database failed to update.'
-        sys.exit(1)
+        logger.error('GeoLiteCity database failed to update.')
+
+def generate_wpad(ip):
+    """
+    Parses the JSON of nearest squids and provides the data as a wpad
+    """
+    squids = get_nearest_squids(ip)
+    if squids:
+        proxy_str = ''
+        for squid in squids:
+            try:
+                proxy_str += "PROXY http://{0}:{1};".format(squid[0].hostname,squid[0].squid_port)
+            except TypeError as e:
+                continue
+        return proxy_str
     else:
         print "GeoLiteCity database successfully updated."

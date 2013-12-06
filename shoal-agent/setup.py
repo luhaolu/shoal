@@ -21,10 +21,9 @@ else:
     config_files_dir = "/etc/shoal/"
 
     initd_dir = "/etc/init.d/"
-    scripts_dir = "scripts/"
-    initd_script = "shoal_agent"
-    if not isfile(join(initd_dir, initd_script)):
-        data_files += [(initd_dir, [join(scripts_dir, initd_script)])]
+    initd_script = "scripts/shoal-agent"
+    if not isfile(initd_dir + "shoal-agent"):
+        data_files += [(initd_dir, [initd_script])]
 
 
 # check for preexisting config files
